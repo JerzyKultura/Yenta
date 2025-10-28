@@ -20,17 +20,28 @@ class LoadSpecNode(AuditedAsyncNode):
         return shared["spec_file"]
 
     async def exec_async(self, spec_file):
-        with open(spec_file) as f:
-            return yaml.safe_load(f)
+        spec_path = Path(spec_file)
+        if not spec_path.exists():
+            raise FileNotFoundError(f"Spec file not found: {spec_file}")
+        
+        try:
+            # Validate spec file against schema
+            validated_spec = validate_spec_file(spec_path)
+            logger.info(f"Spec file validated successfully: {spec_file}")
+            return validated_spec.model_dump()
+        except ValidationError as e:
+            logger.error(f"Spec validation failed for {spec_file}: {e}")
+            raise ValueError(f"Invalid spec file format: {e}")
 
     async def post_async(self, shared, _, spec_dict):
         shared["spec"] = spec_dict
+        shared["start_time"] = time.time()
         agent = spec_dict.get("agent_name", "<unnamed>")
         tools = spec_dict.get("tools", [])
         tests = spec_dict.get("custom_tests", [])
-        print(f"\n✓ Loaded spec: {agent}")
-        print(f"  Tools: {', '.join(tools)}")
-        print(f"  Tests to run: {len(tests)}\n")
+        logger.info(f"Loaded spec: {agent}")
+        logger.info(f"Tools: {', '.join(tools)}")
+        logger.info(f"Tests to run: {len(tests)}")
         return "run_tests"
 
 
@@ -147,7 +158,6 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         failures = []
         details = {"latency_ms": round(latency_ms, 2)}
 
-        # Schema validation
         schema_name = test_case.get("expected_schema")
         if status == "PASS" and schema_name:
             model = SCHEMA_REGISTRY.get(schema_name)
@@ -167,7 +177,6 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
             if missing:
                 status, failures = "FAIL", [f"Missing keywords: {missing}"]
 
-        # Latency assertions
         metrics = test_case.get("expected_metrics", {})
         max_latency = metrics.get("max_latency_ms")
         if status == "PASS" and isinstance(max_latency, (int, float)):
@@ -190,7 +199,33 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
     async def post_async(self, shared, _, results):
         shared["results"] = results
         total, passed = len(results), sum(1 for r in results if r["status"] == "PASS")
-        print(f"\n  Completed: {passed}/{total} tests passed\n")
+        logger.info(f"Completed: {passed}/{total} tests passed")
+        
+        # FIXED: Save run history with proper TestResult construction
+        try:
+            duration_ms = (time.time() - shared.get("start_time", time.time())) * 1000
+            run = TestRun(
+                session_id=self.audit_logger.session_id,
+                spec_name=Path(shared["spec_file"]).name,
+                server=shared["spec"].get("mcp_server", shared["spec"].get("mcp_servers", ["unknown"])[0]),
+                status="completed",
+                duration_ms=duration_ms,
+                results=[TestResult(
+                    test_name=r["test_name"],
+                    tool=r["tool"],
+                    arguments=r["arguments"],
+                    response=r["response"],
+                    status=r["status"],
+                    latency_ms=r["metrics"].get("latency_ms", 0.0),  # ✅ FIXED: Extract from metrics
+                    mode=r["mode"],
+                    failures=r.get("failures", []),
+                    expected=r.get("expected", {})
+                ) for r in results]
+            )
+            self.mock_registry.save_run(run)
+        except Exception as e:
+            logger.warning(f"Could not save run history: {e}")
+        
         return "report"
 
 
@@ -226,6 +261,6 @@ class GenerateReportNode(AuditedAsyncNode):
         return "\n".join(lines)
 
     async def post_async(self, shared, _, report):
-        print(report)
+        logger.info("Test report generated")
         shared["report"] = report
         return "complete"

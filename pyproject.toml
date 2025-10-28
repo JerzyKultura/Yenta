@@ -3,7 +3,7 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "yenta"
+name = "yenta2"
 version = "0.1.0"
 description = "Spec-driven MCP testing and auditing framework"
 authors = [
@@ -18,7 +18,10 @@ dependencies = [
   "pyyaml",
   "opentelemetry-api",
   "opentelemetry-sdk",
-  "agora @ git+https://github.com/JerzyKultura/Agora.git"
+  "agora @ git+https://github.com/JerzyKultura/Agora.git",
+  "fastmcp",
+  "typer[all]",
+  "rich"
 ]
 
 [tool.setuptools.packages.find]
